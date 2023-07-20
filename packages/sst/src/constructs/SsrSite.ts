@@ -65,7 +65,7 @@ import {
 } from "aws-cdk-lib/aws-cloudfront";
 import { ICertificate } from "aws-cdk-lib/aws-certificatemanager";
 import { AwsCliLayer } from "aws-cdk-lib/lambda-layer-awscli";
-import { S3Origin, HttpOrigin } from "aws-cdk-lib/aws-cloudfront-origins";
+import { S3Origin, HttpOrigin, OriginGroup } from "aws-cdk-lib/aws-cloudfront-origins";
 import { CloudFrontTarget } from "aws-cdk-lib/aws-route53-targets";
 
 import { App } from "./App.js";
@@ -971,8 +971,27 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
       code: CfFunctionCode.fromInline(`
 function handler(event) {
   var request = event.request;
-  request.headers["x-forwarded-host"] = request.headers.host;
+  var uri = request.uri;
+
+  request.headers['x-forwarded-host'] = { value: request.headers.host.value };
+
   ${this.buildConfig.serverCFFunctionInjection || ""}
+
+  if(uri.endWith("/")) {
+    return {
+      statusCode: 302,
+      statusDescription: "Found",
+      headers: {
+        { "location": { value: uri.slice(0, -1) } }
+      }
+    };
+  }
+
+  if (uri.endsWith("/")) {
+    request.uri += "index.html";
+  } else if (!uri.split("/").pop().includes(".")) {
+    request.uri += "/index.html";
+  }
   return request;
 }`),
     });
@@ -1048,15 +1067,21 @@ function handler(event) {
       authType: FunctionUrlAuthType.NONE,
     });
 
+    const httpOrigin = new HttpOrigin(Fn.parseDomainName(fnUrl.url), {
+      readTimeout:
+        typeof timeout === "string"
+          ? toCdkDuration(timeout)
+          : CdkDuration.seconds(timeout),
+    });
+
     return {
       viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-      origin: new HttpOrigin(Fn.parseDomainName(fnUrl.url), {
-        readTimeout:
-          typeof timeout === "string"
-            ? toCdkDuration(timeout)
-            : CdkDuration.seconds(timeout),
+      origin: new OriginGroup({
+        primaryOrigin: this.s3Origin,
+        fallbackOrigin: httpOrigin,
+        fallbackStatusCodes: [403, 404],
       }),
-      allowedMethods: AllowedMethods.ALLOW_ALL,
+      allowedMethods: AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
       cachedMethods: CachedMethods.CACHE_GET_HEAD_OPTIONS,
       compress: true,
       cachePolicy,
@@ -1111,9 +1136,10 @@ function handler(event) {
   }
 
   protected addStaticFileBehaviors() {
+    return;
     const { cdk } = this.props;
 
-    // Create a template for statics behaviours
+    // Create a template for statics behaviors
     const publicDir = path.join(
       this.props.path,
       this.buildConfig.clientBuildOutputDir
