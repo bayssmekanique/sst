@@ -62,6 +62,7 @@ import {
   Function as CfFunction,
   FunctionCode as CfFunctionCode,
   FunctionEventType as CfFunctionEventType,
+  AddBehaviorOptions as CfAddBehaviorOptions,
 } from "aws-cdk-lib/aws-cloudfront";
 import { ICertificate } from "aws-cdk-lib/aws-certificatemanager";
 import { AwsCliLayer } from "aws-cdk-lib/lambda-layer-awscli";
@@ -370,7 +371,8 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
   protected serverLambdaForRegional?: SsrFunction;
   private serverLambdaForDev?: SsrFunction;
   protected bucket: Bucket;
-  private cfFunction: CfFunction;
+  private serverRouteCfFunction?: CfFunction;
+  private staticDirectoryRouteCfFunction?: CfFunction;
   private s3Origin: S3Origin;
   private distribution: Distribution;
   private hostedZone?: IHostedZone;
@@ -402,7 +404,7 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
 
     if (this.doNotDeploy) {
       // @ts-ignore
-      this.cfFunction = this.bucket = this.s3Origin = this.distribution = null;
+      this.bucket = this.s3Origin = this.distribution = null;
       this.serverLambdaForDev = this.createFunctionForDev();
       return;
     }
@@ -434,7 +436,9 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
     // Create CloudFront
     this.validateCloudFrontDistributionSettings();
     this.s3Origin = this.createCloudFrontS3Origin();
-    this.cfFunction = this.createCloudFrontFunction();
+    this.serverRouteCfFunction = this.createServerRouteCloudFrontFunction();
+    this.staticDirectoryRouteCfFunction =
+      this.createStaticDirectoryCfFunction();
     this.distribution = this.props.edge
       ? this.createCloudFrontDistributionForEdge()
       : this.createCloudFrontDistributionForRegional();
@@ -966,13 +970,29 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
     });
   }
 
-  private createCloudFrontFunction() {
-    return new CfFunction(this, "CloudFrontFunction", {
+  private createServerRouteCloudFrontFunction() {
+    return new CfFunction(this, "CloudFrontServerRouteFunction", {
       code: CfFunctionCode.fromInline(`
 function handler(event) {
   var request = event.request;
   request.headers["x-forwarded-host"] = request.headers.host;
   ${this.buildConfig.serverCFFunctionInjection || ""}
+  return request;
+}`),
+    });
+  }
+
+  private createStaticDirectoryCfFunction() {
+    return new CfFunction(this, "CloudFrontStaticDirectoryFunction", {
+      code: CfFunctionCode.fromInline(`
+function handler(event) {
+  var request = event.request;
+  var uri = request.uri;
+  if (uri.endsWith("/")) {
+    request.uri += "index.html";
+  } else if (!uri.includes(".")) {
+    request.uri += "/index.html";
+  }
   return request;
 }`),
     });
@@ -1064,7 +1084,7 @@ function handler(event) {
       originRequestPolicy: this.buildServerOriginRequestPolicy(),
       ...(cfDistributionProps.defaultBehavior || {}),
       functionAssociations: [
-        ...this.buildBehaviorFunctionAssociations(),
+        ...this.buildServerRouteBehaviorFunctionAssociations(),
         ...(cfDistributionProps.defaultBehavior?.functionAssociations || []),
       ],
     };
@@ -1087,7 +1107,7 @@ function handler(event) {
       originRequestPolicy: this.buildServerOriginRequestPolicy(),
       ...(cfDistributionProps.defaultBehavior || {}),
       functionAssociations: [
-        ...this.buildBehaviorFunctionAssociations(),
+        ...this.buildServerRouteBehaviorFunctionAssociations(),
         ...(cfDistributionProps.defaultBehavior?.functionAssociations || []),
       ],
       edgeLambdas: [
@@ -1101,34 +1121,72 @@ function handler(event) {
     };
   }
 
-  protected buildBehaviorFunctionAssociations() {
-    return [
-      {
-        eventType: CfFunctionEventType.VIEWER_REQUEST,
-        function: this.cfFunction,
-      },
-    ];
+  protected buildServerRouteBehaviorFunctionAssociations() {
+    return !!this.serverRouteCfFunction
+      ? [
+          {
+            eventType: CfFunctionEventType.VIEWER_REQUEST,
+            function: this.serverRouteCfFunction,
+          },
+        ]
+      : [];
   }
 
-  protected addStaticFileBehaviors() {
+  protected buildStaticDirectoryRouteBehaviorFunctionAssociations() {
+    return !!this.staticDirectoryRouteCfFunction
+      ? [
+          {
+            eventType: CfFunctionEventType.VIEWER_REQUEST,
+            function: this.staticDirectoryRouteCfFunction,
+          },
+        ]
+      : [];
+  }
+
+  protected async addStaticFileBehaviors() {
     const { cdk } = this.props;
 
-    // Create a template for statics behaviours
+    // Create a template for statics behaviors
     const publicDir = path.join(
       this.props.path,
       this.buildConfig.clientBuildOutputDir
     );
-    for (const item of fs.readdirSync(publicDir)) {
-      const isDir = fs.statSync(path.join(publicDir, item)).isDirectory();
-      this.distribution.addBehavior(isDir ? `${item}/*` : item, this.s3Origin, {
-        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
-        cachedMethods: CachedMethods.CACHE_GET_HEAD_OPTIONS,
-        compress: true,
-        cachePolicy: CachePolicy.CACHING_OPTIMIZED,
-        responseHeadersPolicy: cdk?.responseHeadersPolicy,
+
+    const defaultStaticBehavior = {
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+      cachedMethods: CachedMethods.CACHE_GET_HEAD_OPTIONS,
+      compress: true,
+      cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+      responseHeadersPolicy: cdk?.responseHeadersPolicy,
+    } satisfies CfAddBehaviorOptions;
+
+    const addStaticFileBehaviorsForDirectory = (sourceDir: string, nestedRoute = "") => {
+      fs.readdirSync(sourceDir).forEach((item) => {
+        const isDir = fs.statSync(path.join(sourceDir, item)).isDirectory();
+
+        if (item === "index.html") {
+          this.distribution.addBehavior(path.join(nestedRoute, "/"), this.s3Origin, {
+            ...defaultStaticBehavior,
+            functionAssociations:
+              this.buildStaticDirectoryRouteBehaviorFunctionAssociations(),
+          });
+        } else {
+          this.distribution.addBehavior(path.join(nestedRoute, item), this.s3Origin, {
+            ...defaultStaticBehavior,
+            functionAssociations: isDir
+              ? this.buildStaticDirectoryRouteBehaviorFunctionAssociations()
+              : undefined,
+          });
+        }
+
+        if (isDir) {
+          addStaticFileBehaviorsForDirectory(path.join(sourceDir, item), path.join(nestedRoute, item));
+        }
       });
-    }
+    };
+
+    addStaticFileBehaviorsForDirectory(publicDir);
   }
 
   protected buildServerCachePolicy(allowedHeaders?: string[]) {
