@@ -250,6 +250,7 @@ export class NextjsSite extends SsrSite {
     });
     this.removeSourcemaps();
     return this.validatePlan({
+      deploymentStrategy: edge ? "edge" : "regional",
       cloudFrontFunctions: {
         serverCfFunction: {
           constructId: "CloudFrontFunction",

@@ -63,6 +63,7 @@ export class SvelteKitSite extends SsrSite {
     };
 
     return this.validatePlan({
+      deploymentStrategy: edge ? "edge" : "regional",
       buildId: JSON.parse(
         fs
           .readFileSync(path.join(sitePath, clientDir, "_app/version.json"))

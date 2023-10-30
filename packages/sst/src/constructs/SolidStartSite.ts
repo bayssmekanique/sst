@@ -39,6 +39,7 @@ export class SolidStartSite extends SsrSite {
     };
 
     return this.validatePlan({
+      deploymentStrategy: edge ? "edge" : "regional",
       cloudFrontFunctions: {
         serverCfFunction: {
           constructId: "CloudFrontFunction",

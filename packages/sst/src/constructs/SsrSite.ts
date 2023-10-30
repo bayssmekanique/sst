@@ -124,6 +124,7 @@ type OriginGroupConfig = {
   fallbackStatusCodes?: number[];
 };
 type OriginsMap = Record<string, S3Origin | HttpOrigin | OriginGroup>;
+type DeploymentStrategy = "regional" | "edge" | "static";
 
 export type Plan = ReturnType<SsrSite["validatePlan"]>;
 export interface SsrSiteNodeJSProps extends NodeJSProps {}
@@ -485,12 +486,12 @@ export type SsrSiteNormalizedProps = SsrSiteProps & {
  */
 export abstract class SsrSite extends Construct implements SSTConstruct {
   public readonly id: string;
-  protected deploymentStrategy?: "regional" | "edge";
   protected props: SsrSiteNormalizedProps;
   protected doNotDeploy: boolean;
   protected bucket: Bucket;
   protected serverFunction?: EdgeFunction | SsrFunction;
   private serverFunctionForDev?: SsrFunction;
+  private deploymentStrategy?: DeploymentStrategy;
   private distribution: Distribution;
 
   constructor(scope: Construct, id: string, rawProps?: SsrSiteProps) {
@@ -565,6 +566,9 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
     buildApp();
     const plan = this.plan(bucket);
 
+    // Determine deployment strategy
+    const deploymentStrategy = plan.deploymentStrategy ?? "regional";
+
     // Create CloudFront
     const cfFunctions = createCloudFrontFunctions();
     const edgeFunctions = createEdgeFunctions();
@@ -572,21 +576,13 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
     const distribution = createCloudFrontDistribution();
     createDistributionInvalidation();
 
-    // Determine deployment strategy
-    this.deploymentStrategy =
-      Object.keys(edgeFunctions).length > 0
-        ? "edge"
-        : ssrFunctions.length > 0
-        ? "regional"
-        : undefined;
-    const deploymentStrategy = this.deploymentStrategy;
-
     // Create Warmer
     createWarmer();
 
     this.bucket = bucket;
     this.distribution = distribution;
     this.serverFunction = ssrFunctions[0] ?? Object.values(edgeFunctions)[0];
+    this.deploymentStrategy = deploymentStrategy;
 
     app.registerTypes(this);
 
@@ -1532,6 +1528,7 @@ function handler(event) {
     cloudFrontFunctions?: CloudFrontFunctions;
     edgeFunctions?: EdgeFunctions;
     origins: Origins;
+    deploymentStrategy?: DeploymentStrategy;
     behaviors: {
       cacheType: "server" | "static";
       pattern?: string;

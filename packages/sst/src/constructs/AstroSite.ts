@@ -109,6 +109,7 @@ export class AstroSite extends SsrSite {
     };
 
     const plan: Plan = {
+      deploymentStrategy: buildMeta.deploymentStrategy,
       cloudFrontFunctions: {
         serverCfFunction: {
           constructId: "CloudFrontFunction",
