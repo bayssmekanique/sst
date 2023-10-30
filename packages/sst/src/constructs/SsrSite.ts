@@ -185,11 +185,6 @@ export interface SsrSiteProps {
    */
   customDomain?: string | SsrDomainProps;
   /**
-   * The SSR function is deployed to Lambda in a single region. Alternatively, you can enable this option to deploy to Lambda@Edge.
-   * @default false
-   */
-  edge?: boolean;
-  /**
    * The execution timeout in seconds for SSR function.
    * @default 10 seconds
    * @example
@@ -490,6 +485,7 @@ export type SsrSiteNormalizedProps = SsrSiteProps & {
  */
 export abstract class SsrSite extends Construct implements SSTConstruct {
   public readonly id: string;
+  protected deploymentStrategy?: "regional" | "edge";
   protected props: SsrSiteNormalizedProps;
   protected doNotDeploy: boolean;
   protected bucket: Bucket;
@@ -526,7 +522,6 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
       runtime,
       timeout,
       memorySize,
-      edge,
       regional,
       dev,
       assets,
@@ -577,6 +572,15 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
     const distribution = createCloudFrontDistribution();
     createDistributionInvalidation();
 
+    // Determine deployment strategy
+    this.deploymentStrategy =
+      Object.keys(edgeFunctions).length > 0
+        ? "edge"
+        : ssrFunctions.length > 0
+        ? "regional"
+        : undefined;
+    const deploymentStrategy = this.deploymentStrategy;
+
     // Create Warmer
     createWarmer();
 
@@ -597,11 +601,11 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
         typeof timeout === "number"
           ? timeout
           : toCdkDuration(timeout).toSeconds();
-      const limit = edge ? 30 : 180;
+      const limit = deploymentStrategy === "edge" ? 30 : 180;
       if (num > limit) {
         throw new VisibleError(
-          edge
-            ? `In the "${id}" construct, timeout must be less than or equal to 30 seconds when the "edge" flag is enabled.`
+          deploymentStrategy === "edge"
+            ? `In the "${id}" construct, timeout must be less than or equal to 30 seconds when deploying to the edge.`
             : `In the "${id}" construct, timeout must be less than or equal to 180 seconds.`
         );
       }
@@ -719,7 +723,7 @@ export abstract class SsrSite extends Construct implements SSTConstruct {
       //       need to handle warming multiple functions.
       if (!warm) return;
 
-      if (warm && edge) {
+      if (warm && deploymentStrategy === "edge") {
         throw new VisibleError(
           `In the "${id}" Site, warming is currently supported only for the regional mode.`
         );
@@ -1464,7 +1468,7 @@ function handler(event) {
         runtime: this.props.runtime,
         customDomainUrl: this.customDomainUrl,
         url: this.url,
-        edge: this.props.edge,
+        deploymentStrategy: this.deploymentStrategy,
         server: (this.serverFunctionForDev || this.serverFunction)
           ?.functionArn!,
         secrets: (this.props.bind || [])
